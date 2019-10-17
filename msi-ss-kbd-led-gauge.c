@@ -3,32 +3,20 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <X11/Xlib.h>
-#include <X11/Xutil.h>
 #include <X11/XKBlib.h>
 #include <X11/Xlibint.h>
-#include <X11/Xatom.h>
 #include <err.h>
 #include <math.h>
 
 const int VENDOR_ID = 0x1770;
 const int PRODUCT_ID = 0xff00;
 
-enum Operation {
-    SET_COLOR = 66,
-    SET_MODE = 65,
-    SET_RGB = 64
-};
-
-const int TEMP_LOW = 62000;
-const int TEMP_HIGH = 85000;
-
-#define BUFF_SIZE 8
-
-int group_index = 0;
-unsigned char group_colors[3][3] ={
-        {32, 16, 0},
-         {127, 0, 127},
-        {0, 0, 128},
+struct Config{
+    int temp_low;
+    int temp_high;
+    int intensivity;
+    int delay;
+    char *sensors_path;
 };
 
 enum Region {
@@ -41,58 +29,18 @@ enum Region {
     TOUCHPAD = 7
 };
 
-enum Color {
-    COLOR_OFF = 0,
-    COLOR_RED = 1,
-    COLOR_ORANGE = 2,
-    COLOR_YELLOW = 3,
-    COLOR_GREEN = 4,
-    COLOR_SKY = 5,
-    COLOR_BLUE = 6,
-    COLOR_PURPLE = 7,
-    COLOR_WHITE = 8
-};
-
-enum Intensity {
-    INTENSITY_HIGH = 0,
-    INTENSITY_MEDIUM = 1,
-    INTENSITY_LOW = 2,
-    INTENSITY_LIGHT = 3
-};
-
-const unsigned char colors[] = {COLOR_RED, COLOR_YELLOW, COLOR_GREEN};
-
 int set_rgb_color(enum Region region, unsigned char red, unsigned char green, unsigned char blue) {
-    static union {
-        struct {
-            unsigned char v1, v2, op;
-            union {
-                struct {
-                    unsigned char mode;
-                };
-                struct{
-                    unsigned char region;
-
-                    union {
-                        struct {
-                            unsigned char color, intensity;
-                        };
-                        struct {
-                            unsigned char red, green, blue;
-                        };
-                    };
-                };
-            };
-            unsigned char end;
-        };
-        unsigned char buff[BUFF_SIZE];
-    } kbd_operation = {1, 2, 0, 0, 236};
+    struct {
+        unsigned char v1, v2, op;
+        unsigned char region;
+        unsigned char red, green, blue;
+        unsigned char end;
+    } kbd_operation = {1, 2, 64, 0, 0, 0, 0, 236};
 
     static hid_device *kbd = NULL;
 
     int result = 0;
 
-    kbd_operation.op = SET_RGB;
     kbd_operation.region = region;
     kbd_operation.red = red;
     kbd_operation.green = green;
@@ -102,20 +50,20 @@ int set_rgb_color(enum Region region, unsigned char red, unsigned char green, un
         kbd = hid_open(VENDOR_ID, PRODUCT_ID, NULL);
         if (!kbd) {
             fprintf(stderr, "cannot open usb device");
-            exit(1);
+            // exit(1);
+            return -1;
         }
     }
 
-    result = hid_send_feature_report(kbd, kbd_operation.buff, BUFF_SIZE);
-    if (result < BUFF_SIZE) {
+    result = hid_send_feature_report(kbd, (const unsigned char*)&kbd_operation, sizeof(kbd_operation));
+    if (result < sizeof(kbd_operation)) {
         printf("reconnect usb");
         if (kbd) {
             hid_close(kbd);
+            kbd = NULL;
         }
-        kbd = NULL;
-        return set_rgb_color(region, red, green, blue);
+        return -1;
     }
-
     return 1;
 }
 
@@ -123,50 +71,51 @@ void *temp_display(void *param) {
     char *src = (char *) param;
     FILE *f;
     int temp;
-
-    static int old_group_index = -1;
-
-    float prc, old_prc = 0;
+    double prc, old_prc = -1.0;
     unsigned char r, g, b;
 
+    struct Config *config = param;
+    
     while (1) {
-        f = fopen(src, "r");
+        f = fopen(config->sensors_path, "r");
         if (!f) {
             fprintf(stderr, "cannot read temp '%s'", src);
             exit(1);
         }
         fscanf(f, "%d", &temp);
         fclose(f);
-
-        if (temp <= TEMP_LOW) {
-            temp = TEMP_LOW + 1;
+        temp = temp / 1000;
+        if (temp <= config->temp_low) {
+            temp = config->temp_low + 1;
         }
 
-        if (temp > TEMP_HIGH) {
-            temp = TEMP_HIGH;
+        if (temp > config->temp_high) {
+            temp = config->temp_high;
         }
 
-        prc = (float) (temp - TEMP_LOW) / (float) (TEMP_HIGH - TEMP_LOW);
+        prc = (double) (temp - config->temp_low) / (double) (config->temp_high - config->temp_low);
         if(fabs(prc - old_prc) > 0.01){
             old_prc = prc;
-            r = (unsigned char) (64.0 * (prc - 0.02));
-            g = (unsigned char) (64.0 * (1.0 - prc));
+            r = (unsigned char) (config->intensivity * (prc));
+            g = (unsigned char) (config->intensivity * (1.0 - prc));
             b = 0;
             set_rgb_color(REGION_RIGHT, r, g, b);
-//            printf("%.3f%% %3u %3u %3u \n", prc, r, g, b);
+             printf("temp: %5d %3.0f%% %3u %3u %3u \n", temp, prc*100, r, g, b);
         }
 
-        if(old_group_index != group_index) {
-            old_group_index = group_index;
-            set_rgb_color(REGION_LEFT, group_colors[group_index][0], group_colors[group_index][1], group_colors[group_index][2]);
-            set_rgb_color(REGION_MIDDLE, group_colors[group_index][0], group_colors[group_index][1], group_colors[group_index][2]);
-        }
-
-        usleep(500);
+        usleep(config->delay);
     }
 }
 
 int main() {
+    const unsigned char group_colors[3][3] ={
+            {32, 16, 0},
+            {127, 0, 127},
+            {0, 0, 128},
+    };
+
+    struct Config config = {60, 85, 64, 1000, NULL};
+
     pthread_t tid;
     pthread_attr_t attr;
 
@@ -175,7 +124,9 @@ int main() {
 
     int xkbEventType, xkbError, reason_rtrn, mjr, mnr;
     char *display_name = NULL;
-
+    
+    int group_index, old_group_index = -1;
+    
     mjr = XkbMajorVersion;
     mnr = XkbMinorVersion;
 
@@ -208,13 +159,20 @@ int main() {
     }
 
     pthread_attr_init(&attr);
-    pthread_create(&tid, &attr, temp_display, "/sys/class/hwmon/hwmon0/temp1_input");
+    config.sensors_path = "/sys/class/hwmon/hwmon0/temp1_input";
+    pthread_create(&tid, &attr, temp_display, &config);
 
     XkbSelectEventDetails(dpy, XkbUseCoreKbd, XkbStateNotify, XkbAllStateComponentsMask, XkbGroupStateMask);
     while (1) {
         XNextEvent(dpy, &ev.core);
         if (ev.any.xkb_type == XkbStateNotify) {
             group_index = ev.state.locked_group;
+            if(old_group_index != group_index) {
+                old_group_index = group_index;
+                set_rgb_color(REGION_LEFT, group_colors[group_index][0], group_colors[group_index][1], group_colors[group_index][2]);
+                set_rgb_color(REGION_MIDDLE, group_colors[group_index][0], group_colors[group_index][1], group_colors[group_index][2]);
+            }
+
         }
     }
 }
