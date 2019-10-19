@@ -11,6 +11,8 @@
 const int VENDOR_ID = 0x1770;
 const int PRODUCT_ID = 0xff00;
 
+pthread_mutex_t usbmutex;
+
 struct Config{
     int temp_low;
     int temp_high;
@@ -46,12 +48,12 @@ int set_rgb_color(enum Region region, unsigned char red, unsigned char green, un
     kbd_operation.green = green;
     kbd_operation.blue = blue;
 
+    pthread_mutex_lock(&usbmutex);
     if (!kbd) {
         kbd = hid_open(VENDOR_ID, PRODUCT_ID, NULL);
         if (!kbd) {
             fprintf(stderr, "cannot open usb device");
-            // exit(1);
-            return -1;
+             exit(1);
         }
     }
 
@@ -62,8 +64,11 @@ int set_rgb_color(enum Region region, unsigned char red, unsigned char green, un
             hid_close(kbd);
             kbd = NULL;
         }
+        pthread_mutex_unlock(&usbmutex);
         return -1;
     }
+
+    pthread_mutex_unlock(&usbmutex);
     return 1;
 }
 
@@ -75,7 +80,7 @@ void *temp_display(void *param) {
     unsigned char r, g, b;
 
     struct Config *config = param;
-    
+
     while (1) {
         f = fopen(config->sensors_path, "r");
         if (!f) {
@@ -100,7 +105,7 @@ void *temp_display(void *param) {
             g = (unsigned char) (config->intensivity * (1.0 - prc));
             b = 0;
             set_rgb_color(REGION_RIGHT, r, g, b);
-             printf("temp: %5d %3.0f%% %3u %3u %3u \n", temp, prc*100, r, g, b);
+            // printf("temp: %5d %3.0f%% %3u %3u %3u \n", temp, prc*100, r, g, b);
         }
 
         usleep(config->delay);
@@ -161,6 +166,10 @@ int main() {
     pthread_attr_init(&attr);
     config.sensors_path = "/sys/class/hwmon/hwmon0/temp1_input";
     pthread_create(&tid, &attr, temp_display, &config);
+
+    if(pthread_mutex_init(&usbmutex, NULL)){
+        printf("Error while using pthread_mutex_init\n");
+    }
 
     XkbSelectEventDetails(dpy, XkbUseCoreKbd, XkbStateNotify, XkbAllStateComponentsMask, XkbGroupStateMask);
     while (1) {
